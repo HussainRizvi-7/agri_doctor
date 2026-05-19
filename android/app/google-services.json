@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "347863575058",
+    "project_id": "agri-doctor-ea09c",
+    "storage_bucket": "agri-doctor-ea09c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:347863575058:android:2d023b6867c5269e7dc6cb",
+        "android_client_info": {
+          "package_name": "com.mad.agridoctor"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDkrIWRilmLcgRo7teQ46tcnB523S5dYLQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
