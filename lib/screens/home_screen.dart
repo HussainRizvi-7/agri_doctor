@@ -10,6 +10,8 @@ import 'scan_screen.dart';
 import 'disease_list_screen.dart';
 import 'tips_screen.dart';
 import 'history_screen.dart';
+import 'analytics_screen.dart';
+import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -25,10 +27,13 @@ class HomeScreen extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.history),
             tooltip: 'Scan History',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const HistoryScreen()),
-            ),
+            onPressed: () {
+              AnalyticsService().logHistoryOpened().catchError((_) {});
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const HistoryScreen()),
+              );
+            },
           ),
           IconButton(
             icon: const Icon(Icons.info_outline),
@@ -100,7 +105,7 @@ class HomeScreen extends StatelessWidget {
                     context: context,
                     icon: Icons.local_hospital,
                     label: 'View Diseases',
-                    subtitle: 'Browse all plant diseases',
+                    subtitle: '38 AI-detectable disease classes by crop',
                     color: const Color(0xFF388E3C),
                     onTap: () {
                       Navigator.push(
@@ -114,7 +119,26 @@ class HomeScreen extends StatelessWidget {
 
                   const SizedBox(height: 14),
 
-                  // Button 3: Farmer Tips (Bonus)
+                  // Button 3: AI Analytics
+                  _buildMainButton(
+                    context: context,
+                    icon: Icons.insights,
+                    label: 'AI Insights & Analytics',
+                    subtitle: 'Scan trends, charts, and smart field insights',
+                    color: const Color(0xFF1B5E20),
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const AnalyticsScreen(),
+                        ),
+                      );
+                    },
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  // Button 4: Farmer Tips (Bonus)
                   _buildMainButton(
                     context: context,
                     icon: Icons.lightbulb,
@@ -139,12 +163,7 @@ class HomeScreen extends StatelessWidget {
             // --- Quick Stats Section ---
             _buildStatsRow(),
 
-            const SizedBox(height: 30),
-
-            // --- Disclaimer Footer ---
-            _buildFooter(),
-
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
           ],
         ),
       ),
@@ -204,14 +223,13 @@ class HomeScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          // Badge row
-          Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
-              _buildBadge('🌾 Wheat'),
-              const SizedBox(width: 8),
-              _buildBadge('🌿 Vegetables'),
-              const SizedBox(width: 8),
-              _buildBadge('🍃 Fruits'),
+              _buildBadge('⚡ AI Powered'),
+              _buildBadge('🧠 TensorFlow Lite'),
+              _buildBadge('📸 Real-Time Detection'),
             ],
           ),
           const SizedBox(height: 12),
@@ -336,11 +354,11 @@ class HomeScreen extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Row(
         children: [
-          _buildStatCard('6+', 'Diseases\nDetected', Icons.bug_report),
+          _buildStatCard('39', 'Disease\nClasses', Icons.biotech),
           const SizedBox(width: 12),
           _buildStatCard('100%', 'Free to\nUse', Icons.star),
           const SizedBox(width: 12),
-          _buildStatCard('5+', 'Farmer\nTips', Icons.lightbulb),
+          _buildStatCard('8', 'Farmer\nTips', Icons.lightbulb),
         ],
       ),
     );
@@ -384,38 +402,6 @@ class HomeScreen extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  // ----------------------------------------------------------------
-  // WIDGET: Footer disclaimer
-  // ----------------------------------------------------------------
-  Widget _buildFooter() {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 20),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFE8F5E9),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFA5D6A7)),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.science, color: Color(0xFF2E7D32), size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'This version simulates AI detection using predefined logic. '
-              'Final version will use TensorFlow Lite for real-time detection.',
-              style: TextStyle(
-                fontSize: 11.5,
-                color: Colors.grey[700],
-                height: 1.4,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -473,11 +459,11 @@ class HomeScreen extends StatelessWidget {
           ],
         ),
         content: const Text(
-          'Agri-Doctor is a smart plant disease detection app designed for farmers.\n\n'
-          'Version: 1.0.0 (Lite)\n'
-          'Built with: Flutter & Dart\n'
-          'Project: Midterm Demo\n\n'
-          'In the final version, real-time ML detection will be integrated.',
+          'Agri-Doctor helps farmers identify crop diseases from leaf photos '
+          'and get practical treatment guidance.\n\n'
+          'AI-powered plant disease detection using TensorFlow Lite.\n\n'
+          'Version: 1.0.0\n'
+          'Built with: Flutter & Dart',
         ),
         actions: [
           TextButton(

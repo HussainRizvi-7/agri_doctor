@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import '../models/scan_result.dart';
+import '../services/analytics_service.dart';
 import '../services/database_service.dart';
+import '../utils/ml_confidence.dart';
 import 'result_screen.dart';
+import 'scan_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -13,70 +17,27 @@ class HistoryScreen extends StatefulWidget {
 
 class _HistoryScreenState extends State<HistoryScreen> {
   final _databaseService = DatabaseService();
-
-  // Incrementing this key forces the StreamBuilder to re-subscribe (pull-to-refresh)
+  final _analytics = AnalyticsService();
   int _streamKey = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _analytics.logHistoryOpened().catchError((_) {});
+  }
 
   Future<void> _refresh() async {
     setState(() => _streamKey++);
     await Future.delayed(const Duration(milliseconds: 400));
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF1F8E9),
-      appBar: AppBar(
-        title: const Text('Scan History'),
-        leading: const BackButton(),
-      ),
-      body: StreamBuilder<List<ScanResult>>(
-        key: ValueKey(_streamKey),
-        stream: _databaseService.getScanHistory(),
-        builder: (context, snapshot) {
-          // ── Loading
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(
-              child: CircularProgressIndicator(color: Color(0xFF2E7D32)),
-            );
-          }
-
-          // ── Error
-          if (snapshot.hasError) {
-            return _buildErrorState();
-          }
-
-          final scans = snapshot.data ?? [];
-
-          // ── Empty
-          if (scans.isEmpty) {
-            return _buildEmptyState();
-          }
-
-          // ── List
-          return RefreshIndicator(
-            color: const Color(0xFF2E7D32),
-            onRefresh: _refresh,
-            child: ListView.builder(
-              physics: const AlwaysScrollableScrollPhysics(
-                parent: BouncingScrollPhysics(),
-              ),
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-              itemCount: scans.length,
-              itemBuilder: (context, index) =>
-                  _ScanCard(
-                    scan: scans[index],
-                    onDelete: () => _confirmDelete(scans[index]),
-                    onTap: () => _openResult(scans[index]),
-                  ),
-            ),
-          );
-        },
-      ),
+  void _openNewScan() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const ScanScreen()),
     );
   }
 
-  // ── Navigate to ResultScreen using stored disease data
   void _openResult(ScanResult scan) {
     Navigator.push(
       context,
@@ -84,13 +45,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
         builder: (_) => ResultScreen(
           disease: scan.toDisease(),
           confidence: scan.confidence > 0 ? scan.confidence : null,
-          historyLocalPath: scan.localImagePath,
+          historyLocalPath:
+              scan.hasPersistedImage ? scan.localImagePath : null,
+          cropName: scan.displayCrop,
+          mlClassIndex: scan.mlClassIndex,
         ),
       ),
     );
   }
 
-  // ── Delete confirmation dialog
   void _confirmDelete(ScanResult scan) {
     showDialog(
       context: context,
@@ -130,7 +93,65 @@ class _HistoryScreenState extends State<HistoryScreen> {
     });
   }
 
-  // ── State widgets
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF1F8E9),
+      appBar: AppBar(
+        title: const Text('Scan History'),
+        leading: const BackButton(),
+      ),
+      body: StreamBuilder<List<ScanResult>>(
+        key: ValueKey(_streamKey),
+        stream: _databaseService.getScanHistory().timeout(
+          const Duration(seconds: 12),
+          onTimeout: (EventSink<List<ScanResult>> sink) {
+            debugPrint('[HistoryScreen] history fetch timed out');
+            sink.addError(
+              TimeoutException('Timed out loading scan history'),
+            );
+          },
+        ),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            debugPrint('[HistoryScreen] Firebase error: ${snapshot.error}');
+            return _buildErrorState();
+          }
+
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(color: Color(0xFF2E7D32)),
+            );
+          }
+
+          final scans = snapshot.data ?? [];
+
+          if (scans.isEmpty) {
+            return _buildEmptyState();
+          }
+
+          return RefreshIndicator(
+            color: const Color(0xFF2E7D32),
+            onRefresh: _refresh,
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(
+                parent: BouncingScrollPhysics(),
+              ),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+              itemCount: scans.length,
+              itemBuilder: (context, index) => _ScanCard(
+                scan: scans[index],
+                onDelete: () => _confirmDelete(scans[index]),
+                onTap: () => _openResult(scans[index]),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildEmptyState() {
     return Center(
       child: Padding(
@@ -141,7 +162,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
-                color: const Color(0xFFA5D6A7).withOpacity(0.3),
+                color: const Color(0xFFA5D6A7).withValues(alpha: 0.3),
                 shape: BoxShape.circle,
               ),
               child: const Icon(Icons.history,
@@ -149,7 +170,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
             const SizedBox(height: 20),
             const Text(
-              'No scans yet',
+              'No scan history yet',
               style: TextStyle(
                 fontSize: 22,
                 fontWeight: FontWeight.bold,
@@ -158,9 +179,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              'Your scan history will appear here\nafter you analyze a leaf photo.',
+              'Your analyzed leaf scans will appear here.\nStart by scanning a leaf photo.',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+              style: TextStyle(fontSize: 14, color: Colors.grey[600], height: 1.5),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _openNewScan,
+              icon: const Icon(Icons.camera_alt),
+              label: const Text('New Scan'),
             ),
           ],
         ),
@@ -187,7 +214,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Check your internet connection\nand try again.',
+              'Check your internet connection and try again.',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 14, color: Colors.grey[600]),
             ),
@@ -210,9 +237,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// _ScanCard — individual history item
-// ─────────────────────────────────────────────────────────────────────────────
 class _ScanCard extends StatelessWidget {
   final ScanResult scan;
   final VoidCallback onTap;
@@ -228,6 +252,7 @@ class _ScanCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = _parseColor(scan.color);
     final severityColor = _severityColor(scan.severity);
+    final level = scan.confidenceLevel;
 
     return GestureDetector(
       onTap: onTap,
@@ -238,27 +263,24 @@ class _ScanCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: color.withOpacity(0.12),
+              color: color.withValues(alpha: 0.12),
               blurRadius: 10,
               offset: const Offset(0, 3),
             ),
           ],
-          border: Border.all(color: color.withOpacity(0.18)),
+          border: Border.all(color: color.withValues(alpha: 0.18)),
         ),
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(14),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ── Thumbnail
               _Thumbnail(scan: scan, accentColor: color),
               const SizedBox(width: 14),
-
-              // ── Info
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Disease name
                     Text(
                       scan.diseaseName,
                       style: const TextStyle(
@@ -266,63 +288,91 @@ class _ScanCard extends StatelessWidget {
                         fontSize: 15,
                         color: Color(0xFF1B5E20),
                       ),
-                      maxLines: 1,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(height: 5),
-
-                    // Severity + confidence row
-                    Row(
+                    const SizedBox(height: 4),
+                    Text(
+                      scan.displayCrop,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[600],
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         _SeverityBadge(
                           label: scan.severity,
                           color: severityColor,
                         ),
-                        const SizedBox(width: 8),
                         if (scan.confidence > 0)
-                          Text(
-                            '${(scan.confidence * 100).toStringAsFixed(1)}% confident',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.grey[500],
-                              fontWeight: FontWeight.w500,
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: _confidenceBg(level),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              '${MlConfidence.percentLabel(scan.confidence)} · ${level.label}',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: _confidenceFg(level),
+                              ),
                             ),
                           ),
                       ],
                     ),
-                    const SizedBox(height: 5),
-
-                    // Timestamp + source
+                    const SizedBox(height: 8),
                     Row(
                       children: [
                         Icon(
                           scan.scanSource == 'camera'
                               ? Icons.camera_alt_outlined
                               : Icons.photo_library_outlined,
-                          size: 12,
-                          color: Colors.grey[400],
+                          size: 13,
+                          color: Colors.grey[500],
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          _formatDate(scan.scannedAt),
+                          _formatDateTime(scan.scannedAt),
                           style: TextStyle(
                             fontSize: 11,
-                            color: Colors.grey[400],
+                            color: Colors.grey[500],
                           ),
                         ),
+                        if (!scan.hasPersistedImage &&
+                            scan.localImagePath != null) ...[
+                          const SizedBox(width: 8),
+                          Icon(Icons.image_not_supported_outlined,
+                              size: 13, color: Colors.grey[400]),
+                          const SizedBox(width: 2),
+                          Text(
+                            'Photo unavailable',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.grey[400],
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ],
                 ),
               ),
-
-              // ── Actions
               Column(
-                mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(Icons.chevron_right,
-                      color: color.withOpacity(0.5), size: 20),
-                  const SizedBox(height: 8),
+                      color: color.withValues(alpha: 0.5), size: 22),
+                  const SizedBox(height: 12),
                   GestureDetector(
                     onTap: onDelete,
                     child: const Icon(Icons.delete_outline,
@@ -358,19 +408,44 @@ class _ScanCard extends StatelessWidget {
     }
   }
 
-  static String _formatDate(DateTime dt) {
+  static Color _confidenceBg(ConfidenceLevel level) {
+    switch (level) {
+      case ConfidenceLevel.high:
+        return const Color(0xFFE8F5E9);
+      case ConfidenceLevel.medium:
+        return const Color(0xFFFFF8E1);
+      case ConfidenceLevel.low:
+        return const Color(0xFFFBE9E7);
+    }
+  }
+
+  static Color _confidenceFg(ConfidenceLevel level) {
+    switch (level) {
+      case ConfidenceLevel.high:
+        return const Color(0xFF2E7D32);
+      case ConfidenceLevel.medium:
+        return const Color(0xFFF9A825);
+      case ConfidenceLevel.low:
+        return const Color(0xFFE65100);
+    }
+  }
+
+  static String _formatDateTime(DateTime dt) {
     final diff = DateTime.now().difference(dt);
     if (diff.inMinutes < 1) return 'Just now';
-    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
-    if (diff.inDays < 1) return '${diff.inHours}h ago';
-    if (diff.inDays == 1) return 'Yesterday';
-    return '${dt.day}/${dt.month}/${dt.year}';
+    if (diff.inHours < 1) return '${diff.inMinutes} min ago';
+    if (diff.inDays < 1) return '${diff.inHours} hr ago';
+    if (diff.inDays == 1) return 'Yesterday · ${_time(dt)}';
+    return '${dt.day}/${dt.month}/${dt.year} · ${_time(dt)}';
+  }
+
+  static String _time(DateTime dt) {
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '$h:$m';
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// _Thumbnail — network image → emoji fallback
-// ─────────────────────────────────────────────────────────────────────────────
 class _Thumbnail extends StatelessWidget {
   final ScanResult scan;
   final Color accentColor;
@@ -379,34 +454,50 @@ class _Thumbnail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final showImage = scan.hasPersistedImage;
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
       child: SizedBox(
-        width: 68,
-        height: 68,
-        child: scan.localImagePath != null
+        width: 72,
+        height: 72,
+        child: showImage
             ? Image.file(
                 File(scan.localImagePath!),
                 fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => _placeholder(),
+                errorBuilder: (context, error, stackTrace) => _placeholder(
+                  icon: Icons.broken_image_outlined,
+                  subtitle: 'Unavailable',
+                ),
               )
-            : _placeholder(),
+            : _placeholder(
+                icon: scan.localImagePath != null
+                    ? Icons.image_not_supported_outlined
+                    : Icons.eco_outlined,
+                subtitle: scan.localImagePath != null ? 'No photo' : null,
+              ),
       ),
     );
   }
 
-  Widget _placeholder() {
+  Widget _placeholder({required IconData icon, String? subtitle}) {
     return Container(
-      color: accentColor.withOpacity(0.1),
+      color: accentColor.withValues(alpha: 0.1),
       alignment: Alignment.center,
-      child: Text(scan.diseaseEmoji, style: const TextStyle(fontSize: 30)),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(scan.diseaseEmoji, style: const TextStyle(fontSize: 26)),
+          if (subtitle != null) ...[
+            const SizedBox(height: 2),
+            Icon(icon, size: 14, color: Colors.grey[500]),
+          ],
+        ],
+      ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// _SeverityBadge
-// ─────────────────────────────────────────────────────────────────────────────
 class _SeverityBadge extends StatelessWidget {
   final String label;
   final Color color;
@@ -416,13 +507,13 @@ class _SeverityBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
+        color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
-        label,
+        label == 'None' ? 'Healthy' : label,
         style: TextStyle(
           fontSize: 11,
           fontWeight: FontWeight.w600,

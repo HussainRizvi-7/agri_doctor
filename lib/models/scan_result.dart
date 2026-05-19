@@ -1,4 +1,7 @@
-import '../models/disease.dart';
+import 'disease.dart';
+import 'disease_catalog.dart';
+import '../services/scan_image_storage.dart';
+import '../utils/ml_confidence.dart';
 
 class ScanResult {
   final String id;
@@ -13,6 +16,8 @@ class ScanResult {
   final String? localImagePath;
   final String scanSource;
   final DateTime scannedAt;
+  final int? mlClassIndex;
+  final String? cropName;
 
   const ScanResult({
     required this.id,
@@ -27,9 +32,23 @@ class ScanResult {
     this.localImagePath,
     required this.scanSource,
     required this.scannedAt,
+    this.mlClassIndex,
+    this.cropName,
   });
 
-  /// Reconstructs a Disease so ResultScreen can be re-opened from history.
+  bool get hasPersistedImage => ScanImageStorage.isImageAvailable(localImagePath);
+
+  ConfidenceLevel get confidenceLevel => MlConfidence.levelFor(confidence);
+
+  String get displayCrop {
+    if (cropName != null && cropName!.isNotEmpty) return cropName!;
+    if (mlClassIndex != null) return cropNameForMlIndex(mlClassIndex!);
+    for (final entry in mlDiseaseCatalog) {
+      if (entry.disease.name == diseaseName) return entry.crop;
+    }
+    return 'Crop';
+  }
+
   Disease toDisease() => Disease(
         name: diseaseName,
         description:
@@ -52,6 +71,8 @@ class ScanResult {
         'localImagePath': localImagePath,
         'scanSource': scanSource,
         'scannedAt': scannedAt.millisecondsSinceEpoch,
+        'mlClassIndex': mlClassIndex,
+        'cropName': cropName,
       };
 
   factory ScanResult.fromMap(String id, Map<String, dynamic> map) {
@@ -60,10 +81,17 @@ class ScanResult {
         ? DateTime.fromMillisecondsSinceEpoch(tsRaw)
         : DateTime.now();
 
+    final diseaseName = (map['diseaseName'] as String?)?.trim() ?? '';
+    if (diseaseName.isEmpty) {
+      throw FormatException('Invalid scan record: missing diseaseName');
+    }
+
+    final mlClassIndex = (map['mlClassIndex'] as num?)?.toInt();
+
     return ScanResult(
       id: id,
       userId: map['userId'] as String? ?? '',
-      diseaseName: map['diseaseName'] as String? ?? 'Unknown',
+      diseaseName: diseaseName,
       diseaseEmoji: map['diseaseEmoji'] as String? ?? '🌿',
       severity: map['severity'] as String? ?? 'Unknown',
       color: map['color'] as String? ?? '#2E7D32',
@@ -73,6 +101,8 @@ class ScanResult {
       localImagePath: map['localImagePath'] as String?,
       scanSource: map['scanSource'] as String? ?? 'unknown',
       scannedAt: scannedAt,
+      mlClassIndex: mlClassIndex,
+      cropName: map['cropName'] as String?,
     );
   }
 }

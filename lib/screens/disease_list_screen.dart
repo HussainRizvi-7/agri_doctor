@@ -1,88 +1,109 @@
-// ============================================================
-// FILE: screens/disease_list_screen.dart
-// PURPOSE: Display all diseases using ListView.builder
-// CONCEPT: ListView.builder, List<Disease>, OOP, Navigator
-// ============================================================
-
 import 'package:flutter/material.dart';
-import '../models/disease.dart';
+import '../models/disease_catalog.dart';
+import '../services/analytics_service.dart';
 import 'result_screen.dart';
 
-/// DiseaseListScreen — Shows all diseases in a scrollable list.
-/// Uses ListView.builder for efficient rendering.
+/// Reference encyclopedia for all ML-detectable plant disease classes.
 class DiseaseListScreen extends StatelessWidget {
   const DiseaseListScreen({super.key});
 
-  // Helper: Convert hex string to Flutter Color
   Color _hexToColor(String hex) {
-    final String cleanHex = hex.replaceAll('#', '');
+    final cleanHex = hex.replaceAll('#', '');
     return Color(int.parse('FF$cleanHex', radix: 16));
   }
 
-  // Helper: Get severity color using if-else
-  Color _getSeverityColor(String severity) {
-    if (severity == 'High') {
-      return const Color(0xFFC62828);
-    } else if (severity == 'Medium') {
-      return const Color(0xFFE65100);
-    } else if (severity == 'None') {
-      return const Color(0xFF2E7D32);
-    } else {
-      return const Color(0xFFF9A825);
+  Color _severityColor(String severity) {
+    switch (severity) {
+      case 'High':
+        return const Color(0xFFC62828);
+      case 'Medium':
+        return const Color(0xFFE65100);
+      case 'None':
+        return const Color(0xFF2E7D32);
+      default:
+        return const Color(0xFFF9A825);
+    }
+  }
+
+  String _cropEmoji(String crop) {
+    switch (crop) {
+      case 'Apple':
+        return '🍎';
+      case 'Blueberry':
+        return '🫐';
+      case 'Cherry':
+        return '🍒';
+      case 'Corn':
+        return '🌽';
+      case 'Grape':
+        return '🍇';
+      case 'Orange':
+        return '🍊';
+      case 'Peach':
+        return '🍑';
+      case 'Pepper':
+        return '🫑';
+      case 'Potato':
+        return '🥔';
+      case 'Raspberry':
+        return '🫐';
+      case 'Soybean':
+        return '🌱';
+      case 'Squash':
+        return '🥒';
+      case 'Strawberry':
+        return '🍓';
+      case 'Tomato':
+        return '🍅';
+      default:
+        return '🌿';
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final grouped = mlDiseasesGroupedByCrop;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Plant Diseases 📋'),
+        title: const Text('Disease Reference'),
         leading: const BackButton(),
       ),
       body: Column(
         children: [
-          // ---- Top Info Banner ----
           _buildInfoBanner(),
-
-          // ---- Disease Count Label ----
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
             child: Row(
               children: [
-                const Icon(
-                  Icons.list_alt,
-                  color: Color(0xFF2E7D32),
-                  size: 18,
-                ),
+                const Icon(Icons.biotech, color: Color(0xFF2E7D32), size: 18),
                 const SizedBox(width: 8),
-                Text(
-                  '${diseaseList.length} diseases found',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                    color: Color(0xFF1B5E20),
+                Expanded(
+                  child: Text(
+                    '$mlDetectableClassCount classes · matches TensorFlow Lite model',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      color: Color(0xFF1B5E20),
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-
-          // ---- ListView.builder for Disease List ----
-          // This is the key Flutter concept: efficient list rendering
           Expanded(
-            child: ListView.builder(
+            child: ListView(
               physics: const BouncingScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
-              // Total number of items = length of diseaseList
-              itemCount: diseaseList.length,
-              // Builder function creates each list item on demand
-              itemBuilder: (BuildContext context, int index) {
-                // Get the Disease object at current index
-                Disease currentDisease = diseaseList[index];
-
-                // Return a Card widget for each disease
-                return _buildDiseaseCard(context, currentDisease, index);
-              },
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+              children: [
+                for (final cropEntry in grouped.entries) ...[
+                  _buildCropHeader(cropEntry.key, cropEntry.value.length),
+                  ...cropEntry.value.map(
+                    (entry) => _buildDiseaseCard(context, entry),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ],
             ),
           ),
         ],
@@ -90,9 +111,6 @@ class DiseaseListScreen extends StatelessWidget {
     );
   }
 
-  // ----------------------------------------------------------------
-  // WIDGET: Top info banner
-  // ----------------------------------------------------------------
   Widget _buildInfoBanner() {
     return Container(
       width: double.infinity,
@@ -104,26 +122,27 @@ class DiseaseListScreen extends StatelessWidget {
           bottomRight: Radius.circular(20),
         ),
       ),
-      child: Row(
+      child: const Row(
         children: [
-          const Icon(Icons.medical_information, color: Colors.white, size: 28),
-          const SizedBox(width: 12),
+          Icon(Icons.menu_book, color: Colors.white, size: 28),
+          SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Disease Encyclopedia',
+                Text(
+                  'Plant Disease Encyclopedia',
                   style: TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.bold,
                     fontSize: 15,
                   ),
                 ),
+                SizedBox(height: 4),
                 Text(
-                  'Tap any disease card to view full details & solutions',
+                  'Browse every class the AI can detect, organized by crop',
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.85),
+                    color: Colors.white70,
                     fontSize: 12,
                   ),
                 ),
@@ -135,142 +154,171 @@ class DiseaseListScreen extends StatelessWidget {
     );
   }
 
-  // ----------------------------------------------------------------
-  // WIDGET: Individual disease card in the list
-  // ----------------------------------------------------------------
-  Widget _buildDiseaseCard(
-    BuildContext context,
-    Disease disease,
-    int index,
-  ) {
-    // Resolve colors for this disease
-    final Color diseaseColor = _hexToColor(disease.color);
-    final Color severityColor = _getSeverityColor(disease.severity);
-
+  Widget _buildCropHeader(String crop, int count) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: GestureDetector(
-        // On tap: navigate to ResultScreen, passing this disease
-        onTap: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => ResultScreen(disease: disease),
-            ),
-          );
-        },
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: [
-              BoxShadow(
-                color: diseaseColor.withOpacity(0.1),
-                blurRadius: 8,
-                offset: const Offset(0, 3),
-              ),
-            ],
-            border: Border.all(
-              color: diseaseColor.withOpacity(0.2),
+      padding: const EdgeInsets.only(top: 12, bottom: 10),
+      child: Row(
+        children: [
+          Text(_cropEmoji(crop), style: const TextStyle(fontSize: 22)),
+          const SizedBox(width: 10),
+          Text(
+            crop,
+            style: const TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF1B5E20),
             ),
           ),
-          child: Row(
-            children: [
-              // ---- Left: Emoji + Number ----
-              Column(
-                children: [
-                  // Disease emoji in colored circle
-                  Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      color: diseaseColor.withOpacity(0.12),
-                      shape: BoxShape.circle,
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      disease.iconEmoji,
-                      style: const TextStyle(fontSize: 32),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  // Index number badge
-                  Text(
-                    '#${index + 1}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: Colors.grey[500],
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: const Color(0xFFE8F5E9),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              '$count',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF2E7D32),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-              const SizedBox(width: 14),
+  Widget _buildDiseaseCard(BuildContext context, MlDiseaseEntry entry) {
+    final disease = entry.disease;
+    final diseaseColor = _hexToColor(disease.color);
+    final severityColor = _severityColor(disease.severity);
 
-              // ---- Middle: Disease Info ----
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Disease name
-                    Text(
-                      disease.name,
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: diseaseColor,
-                      ),
-                    ),
-                    const SizedBox(height: 5),
-                    // Short description (first 70 chars)
-                    Text(
-                      disease.description.length > 75
-                          ? '${disease.description.substring(0, 75)}...'
-                          : disease.description,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey[600],
-                        height: 1.4,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    // Severity chip
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: severityColor.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                          color: severityColor.withOpacity(0.3),
-                        ),
-                      ),
-                      child: Text(
-                        '⚠ Severity: ${disease.severity}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: severityColor,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        elevation: 0,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: () {
+            AnalyticsService()
+                .logDiseaseDetailsOpened(
+                  diseaseName: disease.name,
+                  crop: entry.crop,
+                )
+                .catchError((_) {});
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ResultScreen(
+                  disease: disease,
+                  cropName: entry.crop,
+                  mlClassIndex: entry.mlIndex,
+                  isReferenceView: true,
                 ),
               ),
-
-              const SizedBox(width: 10),
-
-              // ---- Right: Arrow icon ----
-              Icon(
-                Icons.arrow_forward_ios,
-                color: diseaseColor.withOpacity(0.6),
-                size: 15,
-              ),
-            ],
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: diseaseColor.withValues(alpha: 0.2)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.green.withValues(alpha: 0.06),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: diseaseColor.withValues(alpha: 0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    disease.iconEmoji,
+                    style: const TextStyle(fontSize: 28),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        disease.name,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                          color: diseaseColor,
+                          height: 1.25,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Class ${entry.mlIndex} · ${entry.crop}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey[600],
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        disease.description.length > 90
+                            ? '${disease.description.substring(0, 90)}...'
+                            : disease.description,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey[700],
+                          height: 1.4,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: severityColor.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: severityColor.withValues(alpha: 0.35),
+                          ),
+                        ),
+                        child: Text(
+                          disease.isHealthy
+                              ? 'Healthy'
+                              : 'Severity: ${disease.severity}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: severityColor,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right,
+                  color: diseaseColor.withValues(alpha: 0.7),
+                  size: 22,
+                ),
+              ],
+            ),
           ),
         ),
       ),

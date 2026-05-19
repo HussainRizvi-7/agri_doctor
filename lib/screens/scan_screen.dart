@@ -1,10 +1,13 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import '../services/image_picker_service.dart';
-import '../services/database_service.dart';
+import '../models/disease_catalog.dart';
+import '../models/ml_config.dart';
 import '../services/analytics_service.dart';
+import '../services/database_service.dart';
+import '../services/image_picker_service.dart';
 import '../services/ml_service.dart';
+import '../services/scan_image_storage.dart';
 import 'result_screen.dart';
 
 class ScanScreen extends StatefulWidget {
@@ -19,19 +22,20 @@ class _ScanScreenState extends State<ScanScreen>
   File? _selectedImage;
   ImageSource? _imageSource;
   bool _isAnalyzing = false;
+  bool _isLoadingImage = false;
 
   final _imagePickerService = ImagePickerService();
   final _databaseService = DatabaseService();
   final _analytics = AnalyticsService();
-  final _mlService = MLService(); // singleton — model already loaded by main()
+  final _mlService = MLService();
 
-  // Pulse animation for the analyze button
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
 
   @override
   void initState() {
     super.initState();
+    _analytics.logScanStarted().catchError((_) {});
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
@@ -47,28 +51,63 @@ class _ScanScreenState extends State<ScanScreen>
     super.dispose();
   }
 
-  // ----------------------------------------------------------------
-  // Pick image from camera or gallery
-  // ----------------------------------------------------------------
   Future<void> _pickImage(ImageSource source) async {
-    if (_isAnalyzing) return;
+    if (_isAnalyzing || _isLoadingImage) return;
+
+    setState(() {
+      _isLoadingImage = true;
+      _selectedImage = null;
+      _imageSource = null;
+    });
 
     try {
       final File? file = source == ImageSource.camera
           ? await _imagePickerService.pickFromCamera()
           : await _imagePickerService.pickFromGallery();
 
-      if (file != null && mounted) {
-        setState(() {
-          _selectedImage = file;
-          _imageSource = source;
-        });
+      if (!mounted) return;
+
+      if (file == null) {
+        setState(() => _isLoadingImage = false);
+        return;
       }
+
+      // Show path immediately so the preview area updates without waiting on I/O.
+      setState(() {
+        _selectedImage = file;
+        _imageSource = source;
+      });
+
+      await Future<void>.delayed(Duration.zero);
+
+      final exists = await file.exists();
+      if (!mounted) return;
+
+      setState(() => _isLoadingImage = false);
+
+      if (!exists) {
+        setState(() {
+          _selectedImage = null;
+          _imageSource = null;
+        });
+        _showMessage('Image file could not be read. Please try again.',
+            isError: true);
+        return;
+      }
+
+      debugPrint('[Scan] image ready for preview: ${file.path}');
     } catch (e) {
       if (mounted) {
+        setState(() {
+          _isLoadingImage = false;
+          _selectedImage = null;
+          _imageSource = null;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Could not access ${source == ImageSource.camera ? 'camera' : 'gallery'}. Check permissions.'),
+            content: Text(
+              'Could not access ${source == ImageSource.camera ? 'camera' : 'gallery'}. Check permissions.',
+            ),
             backgroundColor: Colors.red[700],
             behavior: SnackBarBehavior.floating,
           ),
@@ -77,135 +116,206 @@ class _ScanScreenState extends State<ScanScreen>
     }
   }
 
-  // ----------------------------------------------------------------
-  // Analyze the selected image using TFLite ML model
-  // ----------------------------------------------------------------
   Future<void> _analyzeImage() async {
     if (_selectedImage == null || _isAnalyzing) return;
 
-    // Guard: model failed to load at startup
     if (!_mlService.isModelLoaded) {
-      _showError('ML model is not available. Please restart the app.');
+      _showMessage(
+        'ML model is not available. Please restart the app.',
+        isError: true,
+      );
       return;
     }
 
     setState(() => _isAnalyzing = true);
 
-    final MLResult? result = await _mlService.classify(_selectedImage!);
+    try {
+      final MLResult? result = await _mlService.classify(_selectedImage!);
 
-    if (!mounted) return;
-    setState(() => _isAnalyzing = false);
+      if (!mounted) return;
+      setState(() => _isAnalyzing = false);
 
-    // ── Error: inference returned null (decode failure, etc.)
-    if (result == null) {
-      _showError('Analysis failed. Please try again with a clearer photo.');
-      return;
-    }
+      if (result == null) {
+        _showAnalysisFailureDialog();
+        return;
+      }
 
-    // ── Edge case: model sees no plant leaf
-    if (result.isBackground) {
-      _showError(
-        'No plant leaf detected. Please take a closer, clearer photo of a leaf.',
-      );
-      return;
-    }
+      if (result.isBackground) {
+        _analytics.logNoLeafDetected().catchError((_) {});
+        _showNoLeafDialog();
+        return;
+      }
 
-    // ── Low confidence warning (still navigate, but user is informed)
-    if (result.isLowConfidence && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Low confidence (${result.confidencePercent}). '
-            'Result may be inaccurate — try a clearer photo.',
+      final persistedPath =
+          await ScanImageStorage.persistScanImage(_selectedImage!) ??
+              _selectedImage!.path;
+      final source =
+          _imageSource == ImageSource.camera ? 'camera' : 'gallery';
+
+      if (!mounted) return;
+
+      if (result.isLowConfidence) {
+        _analytics
+            .logLowConfidenceScan(
+              diseaseName: result.disease.name,
+              crop: cropNameForMlIndex(result.classIndex),
+              confidence: result.confidence,
+            )
+            .catchError((_) {});
+        _showMessage(result.confidenceLevel.scanMessage, isWarning: true);
+      }
+
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ResultScreen(
+            disease: result.disease,
+            confidence: result.confidence,
+            historyLocalPath: persistedPath,
+            cropName: cropNameForMlIndex(result.classIndex),
+            mlClassIndex: result.classIndex,
+            alternativePredictions: result.shouldShowAlternatives
+                ? result.alternativePredictions
+                : const [],
+            showLowConfidenceNotice: result.isLowConfidence,
           ),
-          backgroundColor: Colors.orange[800],
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 4),
         ),
       );
+
+      _analytics
+          .logDiseaseDetected(
+            diseaseName: result.disease.name,
+            crop: cropNameForMlIndex(result.classIndex),
+            confidence: result.confidence,
+          )
+          .catchError((_) {});
+
+      _databaseService
+          .saveScan(
+            mlResult: result,
+            scanSource: source,
+            localImagePath: persistedPath,
+          )
+          .catchError((_) {});
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isAnalyzing = false);
+        _showAnalysisFailureDialog();
+      }
     }
-
-    // Capture values before navigating
-    final localPath = _selectedImage!.path;
-    final source = _imageSource == ImageSource.camera ? 'camera' : 'gallery';
-
-    if (!mounted) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ResultScreen(
-          disease: result.disease,
-          confidence: result.confidence,
-          historyLocalPath: localPath,
-        ),
-      ),
-    );
-
-    _analytics
-        .logScanPerformed(result.disease.name, result.disease.severity)
-        .catchError((_) {});
-
-    // Save to Realtime Database in background (non-blocking)
-    _databaseService.saveScan(
-      mlResult: result,
-      scanSource: source,
-      localImagePath: localPath,
-    ).catchError((_) {});
   }
 
-  void _showError(String message) {
+  void _showMessage(
+    String message, {
+    bool isError = false,
+    bool isWarning = false,
+  }) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor: Colors.red[700],
+        backgroundColor: isError
+            ? Colors.red[700]
+            : isWarning
+                ? Colors.orange[800]
+                : const Color(0xFF2E7D32),
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 4),
       ),
     );
   }
 
-  // ----------------------------------------------------------------
-  // BUILD
-  // ----------------------------------------------------------------
+  void _showNoLeafDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.nature_people_outlined, color: Color(0xFF2E7D32)),
+            SizedBox(width: 8),
+            Expanded(child: Text('No Valid Leaf Detected')),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'The model could not find a clear plant leaf in this image.',
+            ),
+            const SizedBox(height: 12),
+            ...MlConfig.retakePhotoTips.map(
+              (tip) => Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('• ', style: TextStyle(color: Color(0xFF2E7D32))),
+                    Expanded(child: Text(tip, style: const TextStyle(fontSize: 13))),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK', style: TextStyle(color: Color(0xFF2E7D32))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAnalysisFailureDialog() {
+    _showMessage(
+      'Analysis failed. Please try again with a clearer, well-lit leaf photo.',
+      isError: true,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isBusy = _isAnalyzing || _isLoadingImage;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Scan Leaf 📸'),
+        title: const Text('Scan Leaf'),
         leading: const BackButton(),
       ),
-      body: SingleChildScrollView(
-        physics: const BouncingScrollPhysics(),
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _buildInstructionBanner(),
-            const SizedBox(height: 24),
-            _buildImagePreviewArea(),
-            const SizedBox(height: 20),
-            _buildPickerButtons(),
-            if (_selectedImage != null) ...[
-              const SizedBox(height: 8),
-              _buildChangePhotoLink(),
-            ],
-            if (_selectedImage != null) ...[
+      body: AbsorbPointer(
+        absorbing: isBusy,
+        child: SingleChildScrollView(
+          physics: const BouncingScrollPhysics(),
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildInstructionBanner(),
+              const SizedBox(height: 24),
+              _buildImagePreviewArea(),
               const SizedBox(height: 20),
-              _buildAnalyzeButton(),
+              _buildPickerButtons(),
+              if (_selectedImage != null) ...[
+                const SizedBox(height: 8),
+                _buildChangePhotoLink(),
+              ],
+              if (_selectedImage != null && !_isLoadingImage) ...[
+                const SizedBox(height: 20),
+                _buildAnalyzeButton(),
+              ],
+              const SizedBox(height: 28),
+              _buildHowItWorksSection(),
+              const SizedBox(height: 20),
             ],
-            const SizedBox(height: 28),
-            _buildHowItWorksSection(),
-            const SizedBox(height: 20),
-          ],
+          ),
         ),
       ),
     );
   }
 
-  // ----------------------------------------------------------------
-  // Instruction banner
-  // ----------------------------------------------------------------
   Widget _buildInstructionBanner() {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -217,15 +327,15 @@ class _ScanScreenState extends State<ScanScreen>
         ),
         borderRadius: BorderRadius.circular(16),
       ),
-      child: Row(
+      child: const Row(
         children: [
-          const Icon(Icons.camera_alt, color: Colors.white, size: 32),
-          const SizedBox(width: 14),
+          Icon(Icons.camera_alt, color: Colors.white, size: 32),
+          SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Capture or Upload a Leaf',
                   style: TextStyle(
                     color: Colors.white,
@@ -233,13 +343,10 @@ class _ScanScreenState extends State<ScanScreen>
                     fontSize: 16,
                   ),
                 ),
-                const SizedBox(height: 4),
+                SizedBox(height: 4),
                 Text(
-                  'Take a clear photo of the leaf and tap Analyze.',
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.85),
-                    fontSize: 12,
-                  ),
+                  'Use one clear leaf photo for the most reliable AI result.',
+                  style: TextStyle(color: Colors.white70, fontSize: 12),
                 ),
               ],
             ),
@@ -249,9 +356,6 @@ class _ScanScreenState extends State<ScanScreen>
     );
   }
 
-  // ----------------------------------------------------------------
-  // Image preview area (placeholder or real image with analyze overlay)
-  // ----------------------------------------------------------------
   Widget _buildImagePreviewArea() {
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
@@ -271,13 +375,17 @@ class _ScanScreenState extends State<ScanScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Image or placeholder
-            if (_selectedImage == null)
+            if (_selectedImage == null && !_isLoadingImage)
               _buildPlaceholder()
-            else
-              Image.file(_selectedImage!, fit: BoxFit.cover),
-
-            // Analyzing overlay
+            else if (_selectedImage != null)
+              Image.file(
+                _selectedImage!,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (context, error, stackTrace) =>
+                    _buildPlaceholder(),
+              ),
+            if (_isLoadingImage) _buildImageLoadingOverlay(),
             if (_isAnalyzing) _buildAnalyzingOverlay(),
           ],
         ),
@@ -292,7 +400,7 @@ class _ScanScreenState extends State<ScanScreen>
         Container(
           padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
-            color: const Color(0xFF2E7D32).withOpacity(0.1),
+            color: const Color(0xFF2E7D32).withValues(alpha: 0.1),
             shape: BoxShape.circle,
           ),
           child: const Icon(
@@ -314,23 +422,52 @@ class _ScanScreenState extends State<ScanScreen>
         Text(
           'Use the buttons below to capture\nor pick a leaf photo',
           textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 13,
-            color: Colors.grey[600],
-            height: 1.4,
-          ),
+          style: TextStyle(fontSize: 13, color: Colors.grey[600], height: 1.4),
         ),
       ],
     );
   }
 
-  Widget _buildAnalyzingOverlay() {
+  Widget _buildImageLoadingOverlay() {
     return Container(
-      color: Colors.black.withOpacity(0.55),
-      child: Column(
+      color: const Color(0xFFE8F5E9).withValues(alpha: 0.92),
+      child: const Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const SizedBox(
+          SizedBox(
+            width: 44,
+            height: 44,
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              color: Color(0xFF2E7D32),
+            ),
+          ),
+          SizedBox(height: 14),
+          Text(
+            'Loading image…',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+              color: Color(0xFF1B5E20),
+            ),
+          ),
+          SizedBox(height: 6),
+          Text(
+            'Preparing image for analysis',
+            style: TextStyle(fontSize: 12, color: Color(0xFF558B2F)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAnalyzingOverlay() {
+    return Container(
+      color: Colors.black.withValues(alpha: 0.55),
+      child: const Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
             width: 56,
             height: 56,
             child: CircularProgressIndicator(
@@ -338,31 +475,25 @@ class _ScanScreenState extends State<ScanScreen>
               color: Colors.white,
             ),
           ),
-          const SizedBox(height: 16),
-          const Text(
-            'Analyzing Leaf...',
+          SizedBox(height: 16),
+          Text(
+            'Analyzing leaf image…',
             style: TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.bold,
               fontSize: 18,
             ),
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: 6),
           Text(
-            'Processing image',
-            style: TextStyle(
-              color: Colors.white.withOpacity(0.8),
-              fontSize: 13,
-            ),
+            'Running on-device AI model',
+            style: TextStyle(color: Colors.white70, fontSize: 13),
           ),
         ],
       ),
     );
   }
 
-  // ----------------------------------------------------------------
-  // Camera / Gallery buttons
-  // ----------------------------------------------------------------
   Widget _buildPickerButtons() {
     return Row(
       children: [
@@ -385,68 +516,74 @@ class _ScanScreenState extends State<ScanScreen>
     );
   }
 
+  bool get isBusy => _isAnalyzing || _isLoadingImage;
+
   Widget _buildSourceButton({
     required IconData icon,
     required String label,
     required VoidCallback onTap,
   }) {
     return GestureDetector(
-      onTap: _isAnalyzing ? null : onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.3)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.green.withOpacity(0.08),
-              blurRadius: 10,
-              offset: const Offset(0, 3),
+      onTap: isBusy ? null : onTap,
+      child: Opacity(
+        opacity: isBusy ? 0.5 : 1,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: const Color(0xFF2E7D32).withValues(alpha: 0.3),
             ),
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF2E7D32).withOpacity(0.1),
-                shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.green.withValues(alpha: 0.08),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
               ),
-              child: Icon(icon, color: const Color(0xFF2E7D32), size: 26),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFF1B5E20),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2E7D32).withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: const Color(0xFF2E7D32), size: 26),
               ),
-            ),
-          ],
+              const SizedBox(height: 8),
+              Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1B5E20),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  // ----------------------------------------------------------------
-  // Change photo text link
-  // ----------------------------------------------------------------
   Widget _buildChangePhotoLink() {
     return Center(
       child: GestureDetector(
-        onTap: () => setState(() {
-          _selectedImage = null;
-          _imageSource = null;
-        }),
-        child: const Text(
-          '✕  Remove photo',
+        onTap: isBusy
+            ? null
+            : () => setState(() {
+                  _selectedImage = null;
+                  _imageSource = null;
+                }),
+        child: Text(
+          'Remove photo',
           style: TextStyle(
             fontSize: 13,
-            color: Colors.redAccent,
+            color: isBusy ? Colors.grey : Colors.redAccent,
             fontWeight: FontWeight.w500,
           ),
         ),
@@ -454,18 +591,16 @@ class _ScanScreenState extends State<ScanScreen>
     );
   }
 
-  // ----------------------------------------------------------------
-  // Analyze button (visible only after image is selected)
-  // ----------------------------------------------------------------
   Widget _buildAnalyzeButton() {
     return ScaleTransition(
-      scale: _pulseAnimation,
+      scale: _isAnalyzing ? const AlwaysStoppedAnimation(1.0) : _pulseAnimation,
       child: SizedBox(
         height: 54,
         child: ElevatedButton.icon(
           onPressed: _isAnalyzing ? null : _analyzeImage,
           style: ElevatedButton.styleFrom(
             backgroundColor: const Color(0xFF1B5E20),
+            disabledBackgroundColor: const Color(0xFF81C784),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
             ),
@@ -481,7 +616,7 @@ class _ScanScreenState extends State<ScanScreen>
                 )
               : const Icon(Icons.biotech, size: 22),
           label: Text(
-            _isAnalyzing ? 'Analyzing...' : 'Analyze Leaf',
+            _isAnalyzing ? 'Analyzing…' : 'Analyze Leaf',
             style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
           ),
         ),
@@ -489,9 +624,6 @@ class _ScanScreenState extends State<ScanScreen>
     );
   }
 
-  // ----------------------------------------------------------------
-  // How it works
-  // ----------------------------------------------------------------
   Widget _buildHowItWorksSection() {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -500,7 +632,7 @@ class _ScanScreenState extends State<ScanScreen>
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: Colors.green.withOpacity(0.08),
+            color: Colors.green.withValues(alpha: 0.08),
             blurRadius: 10,
             offset: const Offset(0, 3),
           ),
@@ -514,7 +646,7 @@ class _ScanScreenState extends State<ScanScreen>
               Icon(Icons.info_outline, color: Color(0xFF2E7D32), size: 20),
               SizedBox(width: 8),
               Text(
-                'How Detection Works',
+                'Tips for Best Results',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   fontSize: 15,
@@ -524,44 +656,25 @@ class _ScanScreenState extends State<ScanScreen>
             ],
           ),
           const SizedBox(height: 12),
-          _buildStep('1', 'Take or upload a clear leaf photo'),
-          _buildStep('2', 'Tap "Analyze Leaf" to begin'),
-          _buildStep('3', 'System processes the image'),
-          _buildStep('4', 'Disease identified — solutions displayed'),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStep(String number, String text) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          Container(
-            width: 24,
-            height: 24,
-            decoration: const BoxDecoration(
-              color: Color(0xFF2E7D32),
-              shape: BoxShape.circle,
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              number,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
+          ...MlConfig.retakePhotoTips.take(3).map(
+                (tip) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.check_circle_outline,
+                          size: 16, color: Color(0xFF2E7D32)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          tip,
+                          style: TextStyle(fontSize: 13, color: Colors.grey[700]),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(fontSize: 13, color: Colors.grey[700]),
-            ),
-          ),
         ],
       ),
     );
